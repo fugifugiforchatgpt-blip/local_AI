@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, ttk
+from tkinter import filedialog, scrolledtext, messagebox, ttk
 import threading
 import ollama
 import time
@@ -46,6 +46,7 @@ MODEL_CATALOG = [
     {"id": "llama3.2:1b", "name": "Llama 3.2 1B", "description": "Компактная Llama от Meta. Быстрая.", "min_ram": 3, "min_vram": 1, "size": "1.3 ГБ"},
     {"id": "tinyllama:1.1b", "name": "TinyLlama 1.1B", "description": "Крошечная модель. Работает даже на слабых ПК.", "min_ram": 2, "min_vram": 1, "size": "0.6 ГБ"},
     {"id": "qwen2.5-coder:0.5b", "name": "Qwen 2.5 Coder 0.5B", "description": "Крошечная модель для кода.", "min_ram": 2, "min_vram": 1, "size": "0.4 ГБ"},
+    {"id": "qwen2.5-coder:1.5b", "name": "Qwen 2.5 Coder 1.5B", "description": "Лёгкая модель для кода. Полностью влезает в 3 ГБ VRAM.", "min_ram": 3, "min_vram": 2, "size": "1.0 ГБ"},
     {"id": "granite3-moe:1b", "name": "IBM Granite 3 MoE 1B", "description": "Лёгкая MoE-модель IBM.", "min_ram": 2, "min_vram": 1, "size": "0.7 ГБ"},
     {"id": "smollm2:1.7b", "name": "SmolLM2 1.7B", "description": "Компактная модель для диалогов.", "min_ram": 3, "min_vram": 2, "size": "1.0 ГБ"},
     {"id": "olmo2:1b", "name": "OLMo 2 1B", "description": "Модель для науки и математики.", "min_ram": 2, "min_vram": 1, "size": "0.8 ГБ"},
@@ -404,6 +405,532 @@ class ImageGeneratorWindow:
         # os.startfile(self.app._generated_dir)
 
 
+# ==================== КЛАСС АГЕНТА ====================
+
+CODE_MODEL_KEYWORDS = [
+    "qwen2.5-coder", "deepseek-r1", "deepseek-coder", "codellama",
+    "codegemma", "starcoder", "qwen2.5", "mistral", "phi3", "phi4",
+    "llama3.1", "llama3.2", "llama3.3", "granite3", "qwen3",
+    "gemma3", "gemma2", "dolphin-phi", "openchat", "orca-mini",
+    "vicuna", "zephyr", "stablelm-2", "olmo2", "smollm2",
+    "tinyllama", "minicpm5", "nomic-embed"
+]
+
+
+class AgentWindow:
+    """Отдельное окно «Агент» для автономной работы с кодом."""
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.parent = parent
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("🤖 Агент — автоматическое программирование")
+        self.win.geometry("850x750")
+        self.win.configure(bg="#1e1e1e")
+
+        self.stop_event = threading.Event()
+        self.running = False
+        self._projects_dir = os.path.join(app._script_dir, "projects")
+        os.makedirs(self._projects_dir, exist_ok=True)
+        self.num_ctx_var = tk.StringVar(value="4096")
+        self.max_iterations_var = tk.IntVar(value=5)
+
+        self._build_ui()
+        self._load_code_models()
+
+    def _build_ui(self):
+        # Заголовок
+        tk.Label(
+            self.win, text="🤖 Агент для кода",
+            font=("Arial", 16, "bold"),
+            bg="#1e1e1e", fg="#E91E63"
+        ).pack(pady=(15, 10))
+
+        # ---- Выбор модели ----
+        model_frame = tk.LabelFrame(self.win, text=" Модель ", font=("Arial", 10, "bold"),
+                                    bg="#2d2d2d", fg="#E91E63", padx=10, pady=5)
+        model_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        tk.Label(model_frame, text="Модель для кода:", bg="#2d2d2d", fg="white",
+                 font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 5))
+        self.model_combo = ttk.Combobox(model_frame, state="readonly",
+                                        width=25, font=("Consolas", 10))
+        self.model_combo.pack(side=tk.LEFT, padx=5)
+
+        # ---- Выбор папки проекта ----
+        folder_frame = tk.LabelFrame(self.win, text=" Папка проекта ", font=("Arial", 10, "bold"),
+                                     bg="#2d2d2d", fg="#E91E63", padx=10, pady=5)
+        folder_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        self.folder_path_var = tk.StringVar(value=self._projects_dir)
+        self.folder_label = tk.Label(folder_frame, textvariable=self.folder_path_var,
+                                     bg="#2d2d2d", fg="#00BCD4", font=("Consolas", 10),
+                                     anchor="w", wraplength=600)
+        self.folder_label.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Button(folder_frame, text="📁 Выбрать папку", command=self._select_folder,
+                  bg="#555555", fg="white", font=("Arial", 10), relief=tk.FLAT, padx=10
+                  ).pack(anchor="w")
+
+        # ---- Контекст ----
+        ctx_frame = tk.LabelFrame(self.win, text=" Контекст ", font=("Arial", 10, "bold"),
+                                  bg="#2d2d2d", fg="#E91E63", padx=10, pady=5)
+        ctx_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        tk.Label(ctx_frame, text="Размер контекста (num_ctx):", bg="#2d2d2d", fg="white",
+                 font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 5))
+        self.ctx_combo = ttk.Combobox(ctx_frame, textvariable=self.num_ctx_var, state="readonly",
+                                      values=["1024", "2048", "4096", "8192", "16384"],
+                                      width=8, font=("Consolas", 10))
+        self.ctx_combo.pack(side=tk.LEFT)
+
+        tk.Label(ctx_frame, text="   Макс. итераций:", bg="#2d2d2d", fg="white",
+                 font=("Arial", 10)).pack(side=tk.LEFT, padx=(10, 5))
+        tk.Spinbox(ctx_frame, from_=1, to=100, increment=10,
+                   textvariable=self.max_iterations_var, width=5,
+                   font=("Consolas", 10), bg="#1e1e1e", fg="white",
+                   buttonbackground="#555555", justify=tk.CENTER,
+                   relief=tk.FLAT).pack(side=tk.LEFT)
+
+        # ---- Поле задачи ----
+        task_frame = tk.LabelFrame(self.win, text=" Задача ", font=("Arial", 10, "bold"),
+                                   bg="#2d2d2d", fg="#E91E63", padx=10, pady=5)
+        task_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        self.task_text = tk.Text(task_frame, height=3, wrap=tk.WORD,
+                                 bg="#1e1e1e", fg="white", insertbackground="white",
+                                 font=("Consolas", 11), relief=tk.FLAT, padx=8, pady=8)
+        self.task_text.pack(fill=tk.X, pady=(0, 5))
+        self.task_text.insert("1.0", "Создай игру Змейка на Python с Pygame")
+
+        btn_row = tk.Frame(task_frame, bg="#2d2d2d")
+        btn_row.pack(fill=tk.X)
+
+        self.run_btn = tk.Button(btn_row, text="🚀 Запустить агента",
+                                 command=self._on_run_agent,
+                                 bg="#E91E63", fg="white", font=("Arial", 11, "bold"),
+                                 relief=tk.FLAT, padx=20, pady=8)
+        self.run_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.stop_btn = tk.Button(btn_row, text="⏹ Остановить", command=self._on_stop_agent,
+                                  bg="#D32F2F", fg="white", font=("Arial", 11, "bold"),
+                                  relief=tk.FLAT, padx=20, pady=8, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT)
+
+        # ---- Лог ----
+        log_frame = tk.LabelFrame(self.win, text=" Лог агента ", font=("Arial", 10, "bold"),
+                                  bg="#2d2d2d", fg="#E91E63", padx=10, pady=5)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(5, 15))
+
+        self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state="disabled",
+                                                  bg="#1e1e1e", fg="#dddddd",
+                                                  font=("Consolas", 10), insertbackground="white")
+        self.log_area.pack(fill=tk.BOTH, expand=True)
+
+        self.log_area.tag_config("info", foreground="#dddddd")
+        self.log_area.tag_config("thinking", foreground="#FF9800", font=("Consolas", 10, "italic"))
+        self.log_area.tag_config("creating", foreground="#4CAF50")
+        self.log_area.tag_config("running", foreground="#2196F3")
+        self.log_area.tag_config("error", foreground="#F44336")
+        self.log_area.tag_config("fixing", foreground="#FF9800")
+        self.log_area.tag_config("success", foreground="#4CAF50", font=("Consolas", 10, "bold"))
+        self.log_area.tag_config("stopped", foreground="#FF9800", font=("Consolas", 10, "bold"))
+
+    def _load_code_models(self):
+        """Загружает список моделей из ollama и фильтрует для кода."""
+        installed = set()
+        try:
+            resp = ollama.list()
+            for m in resp.get("models", []):
+                name = m.get("name") or m.get("model")
+                if name:
+                    installed.add(name)
+        except Exception as e:
+            print(f"[Agent] Ошибка загрузки моделей: {e}")
+
+        code_models = []
+        for name in sorted(installed):
+            lower = name.lower()
+            for kw in CODE_MODEL_KEYWORDS:
+                if kw in lower:
+                    # Также ищем в каталоге для красивого названия
+                    display = name
+                    for m in MODEL_CATALOG:
+                        if m["id"] == name:
+                            display = m["name"]
+                            break
+                    code_models.append(display)
+                    break
+
+        if not code_models:
+            code_models = list(self.app.model_map.keys())
+
+        self.model_combo["values"] = code_models
+        if code_models:
+            # По умолчанию qwen2.5-coder
+            default = None
+            for m in code_models:
+                if "qwen2.5-coder" in m.lower() or "qwen 2.5 coder" in m.lower():
+                    default = m
+                    break
+            if default is None:
+                default = code_models[0]
+            self.model_combo.set(default)
+
+    def _select_folder(self):
+        folder = filedialog.askdirectory(
+            title="Выберите папку для проекта",
+            initialdir=self._projects_dir
+        )
+        if folder:
+            self.folder_path_var.set(folder)
+
+    def _log(self, message, tag="info"):
+        self.log_area.config(state="normal")
+        self.log_area.insert(tk.END, message + "\n", (tag,))
+        self.log_area.see(tk.END)
+        self.log_area.config(state="disabled")
+
+    def _on_run_agent(self):
+        if self.running:
+            return
+
+        task = self.task_text.get("1.0", tk.END).strip()
+        if not task:
+            messagebox.showinfo("Агент", "Введите задачу!")
+            return
+
+        model_display = self.model_combo.get()
+        if not model_display:
+            messagebox.showinfo("Агент", "Выберите модель!")
+            return
+
+        real_model = self.app.model_map.get(model_display, model_display)
+
+        self.running = True
+        self.stop_event.clear()
+        self.run_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+
+        self.log_area.config(state="normal")
+        self.log_area.delete("1.0", tk.END)
+        self.log_area.config(state="disabled")
+
+        self._log(f"🤖 Агент запущен", "success")
+        self._log(f"📋 Задача: {task}", "info")
+        self._log(f"🧠 Модель: {model_display}", "thinking")
+        self._log(f"📏 Контекст: {self.num_ctx_var.get()} токенов", "info")
+        self._log(f"🔄 Макс. итераций: {self.max_iterations_var.get()}", "info")
+        self._log(f"📁 Папка: {self.folder_path_var.get()}", "info")
+        self._log("─" * 50, "info")
+
+        threading.Thread(target=self._run_agent_loop,
+                         args=(task, real_model, self.max_iterations_var.get()), daemon=True).start()
+
+    def _on_stop_agent(self):
+        self.stop_event.set()
+        self._log("⏹ Останавливаю агента...", "stopped")
+
+    def _run_agent_loop(self, task, model, max_iterations):
+        """Основной цикл агента: генерация → запуск → исправление."""
+        iteration = 0
+        project_folder = self.folder_path_var.get()
+        os.makedirs(project_folder, exist_ok=True)
+
+        # Системный промт для первой генерации
+        system_prompt = (
+            "Ты — опытный Python-разработчик. Пользователь просит написать программу.\n"
+            "Напиши ПОЛНЫЙ рабочий код. Разбей на файлы, если нужно.\n"
+            "Формат ответа строго такой:\n"
+            "ФАЙЛ: filename.py\n"
+            "```python\n"
+            "код\n"
+            "```\n\n"
+            "Если файлов несколько — повторяй блок.\n"
+            "Главный файл (точка входа) должен называться main.py.\n"
+            "Не используй внешние библиотеки кроме стандартных и pygame.\n"
+            "Код должен быть готов к запуску без изменений."
+        )
+
+        # Собираем историю исправлений
+        history = []
+
+        while iteration < max_iterations and not self.stop_event.is_set():
+            iteration += 1
+            self.win.after(0, lambda i=iteration: self._log(
+                f"\n{'='*50}", "info"))
+            self.win.after(0, lambda i=iteration: self._log(
+                f"🔄 Итерация {i}/{max_iterations}", "thinking"))
+
+            if iteration == 1:
+                # Первая генерация
+                self.win.after(0, lambda: self._log("🤔 Думаю над задачей...", "thinking"))
+
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task}
+                ]
+            else:
+                # Исправление ошибок
+                self.win.after(0, lambda: self._log("🔧 Исправляю ошибки...", "fixing"))
+
+                error_history = "\n".join(history[-3:])  # последние 3 ошибки
+                messages = [
+                    {"role": "system", "content": system_prompt + (
+                        "\n\nПредыдущие попытки завершились с ошибками.\n"
+                        "Исправь код. Вот ошибки:\n" + error_history
+                    )},
+                    {"role": "user", "content": f"Исправь программу: {task}\n\nОшибки:\n{error_history}"}
+                ]
+
+            # Отправляем в Ollama
+            try:
+                response_text = self._ollama_chat(model, messages)
+            except Exception as e:
+                self.win.after(0, lambda err=str(e): self._log(f"❌ Ошибка модели: {err}", "error"))
+                break
+
+            if self.stop_event.is_set():
+                break
+
+            if not response_text:
+                self.win.after(0, lambda: self._log("❌ Модель не дала ответа", "error"))
+                break
+
+            # Парсим файлы из ответа
+            files = self._parse_files(response_text)
+            if not files:
+                self.win.after(0, lambda: self._log(
+                    "⚠️ Не удалось извлечь файлы из ответа модели. "
+                    "Попробую ещё раз...", "error"))
+                history.append("Модель не вернула код в правильном формате")
+                continue
+
+            # Сохраняем файлы
+            for filename, code in files.items():
+                if self.stop_event.is_set():
+                    break
+                filepath = os.path.join(project_folder, filename)
+                self.win.after(0, lambda fn=filename: self._log(
+                    f"📝 Создаю файл {fn}...", "creating"))
+                try:
+                    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.write(code)
+                except Exception as e:
+                    self.win.after(0, lambda fn=filename, err=str(e): self._log(
+                        f"❌ Ошибка записи {fn}: {err}", "error"))
+                    break
+
+            if self.stop_event.is_set():
+                break
+
+            # Определяем главный файл (main.py или первый Python-файл)
+            main_file = None
+            if "main.py" in files:
+                main_file = "main.py"
+            else:
+                py_files = [f for f in files if f.endswith(".py")]
+                if py_files:
+                    main_file = py_files[0]
+
+            if not main_file:
+                self.win.after(0, lambda: self._log(
+                    "⚠️ Нет .py файлов для запуска", "error"))
+                break
+
+            # Запускаем код
+            self.win.after(0, lambda fn=main_file: self._log(
+                f"🚀 Запускаю {fn}...", "running"))
+
+            success, output = self._run_code(os.path.join(project_folder, main_file),
+                                             project_folder)
+
+            if success:
+                self.win.after(0, lambda: self._log(
+                    f"✅ Готово! Код работает.", "success"))
+                self.win.after(0, lambda: self._log(
+                    f"📄 Вывод:\n{output[:2000]}", "info"))
+                break
+            else:
+                error_text = output[-1500:] if len(output) > 1500 else output
+                self.win.after(0, lambda err=error_text: self._log(
+                    f"❌ Ошибка:\n{err}", "error"))
+                history.append(error_text)
+
+                if iteration >= max_iterations:
+                    self.win.after(0, lambda: self._log(
+                        f"⚠️ Достигнут лимит попыток ({max_iterations})", "stopped"))
+                    break
+
+        if self.stop_event.is_set():
+            self.win.after(0, lambda: self._log("⏹ Агент остановлен", "stopped"))
+        elif iteration >= max_iterations:
+            self.win.after(0, lambda: self._log("⚠️ Лимит итераций", "stopped"))
+        else:
+            self.win.after(0, lambda: self._log(
+                f"✨ Работа агента завершена за {iteration} итераций", "success"))
+
+        self.win.after(0, self._finish_agent)
+
+    def _finish_agent(self):
+        self.running = False
+        self.run_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+
+    def _ollama_chat(self, model, messages):
+        """Отправляет запрос в Ollama и возвращает полный текст ответа."""
+        try:
+            options = {
+                "temperature": 0.3,
+                "num_ctx": int(self.num_ctx_var.get()),
+                "num_predict": 1024,
+                "top_k": 20,
+                "top_p": 0.8,
+            }
+            response = ollama.chat(model=model, messages=messages,
+                                   stream=False, options=options,
+                                   keep_alive="10m")
+            msg = response["message"] if isinstance(response, dict) else response.message
+            content = msg["content"] if isinstance(msg, dict) else msg.content
+            return content.strip()
+        except Exception as e:
+            raise e
+
+    def _parse_files(self, text):
+        """Универсальный парсер файлов из ответа модели.
+        Поддерживаемые форматы:
+          a) ФАЙЛ: main.py / FILE: main.py / файл: main.py
+          b) **main.py**
+          c) ### main.py  (markdown-заголовок)
+          d) main.py:    (двоеточие в конце)
+          e) main.py имя_после_пробела  (слово .py в начале строки)
+          f) ```python ... ```  (блок кода, имя ищется выше)
+          g) Несколько блоков без имён → main.py, file_2.py, file_3.py...
+          h) Единственный блок без имени → main.py
+        """
+        files = {}
+        seen_names = set()
+        lines = text.split('\n')
+        i = 0
+        pending_filename = None
+        unnamed_count = 0
+        in_block = False
+        code_lines = []
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            if in_block:
+                if stripped.startswith('```'):
+                    code = '\n'.join(code_lines).strip()
+                    if len(code) >= 10:
+                        if pending_filename:
+                            fname = pending_filename
+                        else:
+                            unnamed_count += 1
+                            fname = "main.py" if unnamed_count == 1 else f"file_{unnamed_count}.py"
+
+                        base, ext = os.path.splitext(fname)
+                        if not ext:
+                            fname += ".py"
+                        unique = fname
+                        counter = 1
+                        while unique in seen_names:
+                            unique = f"{base}_{counter}{ext if ext else '.py'}"
+                            counter += 1
+                        seen_names.add(unique)
+                        files[unique] = code
+
+                    code_lines = []
+                    in_block = False
+                    pending_filename = None
+                    i += 1
+                    continue
+                else:
+                    code_lines.append(line)
+                    i += 1
+                    continue
+
+            # ── не в блоке ──
+
+            # Открывающий ``` или ```python
+            if stripped.startswith('```'):
+                in_block = True
+                i += 1
+                continue
+
+            fname = None
+
+            # a) ФАЙЛ: имя / FILE: имя
+            m = re.match(
+                r'^\s*(?:ФАЙЛ|Файл|FILE|File)\s*:\s*["\']?([\w./\\\-]+\.\w+)["\']?\s*$',
+                stripped, re.IGNORECASE
+            )
+            if m:
+                fname = m.group(1).strip()
+
+            # b) **имя.py**
+            if not fname:
+                m = re.match(r'^\s*\*\*([\w./\\\-]+\.\w+)\*\*\s*$', stripped)
+                if m:
+                    fname = m.group(1).strip()
+
+            # c) ### имя.py
+            if not fname:
+                m = re.match(r'^\s*#{1,6}\s+([\w./\\\-]+\.\w+)\s*$', stripped)
+                if m:
+                    fname = m.group(1).strip()
+
+            # d) имя.py:
+            if not fname:
+                m = re.match(r'^\s*([\w./\\\-]+\.\w+):\s*$', stripped)
+                if m:
+                    fname = m.group(1).strip()
+
+            # e) имя.py в начале строки + продолжение (без ```)
+            if not fname:
+                m = re.match(r'^\s*([\w./\\\-]+\.\w+)\b', stripped)
+                if m and '```' not in stripped:
+                    candidate = m.group(1)
+                    if candidate.endswith(('.py', '.js', '.html', '.css', '.json', '.txt', '.md', '.yml', '.yaml', '.toml', '.ini', '.cfg', '.bat', '.ps1', '.sh')):
+                        after = stripped[m.end():]
+                        if not after or not after[0].isalpha():
+                            fname = candidate
+
+            if fname:
+                pending_filename = fname
+
+            i += 1
+
+        # Если модель закрыла ответ без ``` — блок уже сохранён
+        # (ничего делать не надо, код уже записан)
+
+        return files
+
+    def _run_code(self, main_filepath, workdir):
+        """Запускает Python-файл и возвращает (success, output)."""
+        try:
+            result = subprocess.run(
+                ["python", main_filepath],
+                capture_output=True, text=True, timeout=30,
+                cwd=workdir
+            )
+            if result.returncode == 0:
+                return True, result.stdout
+            else:
+                error = result.stderr or result.stdout
+                return False, error
+        except subprocess.TimeoutExpired:
+            return False, "⏱️ Тайм-аут выполнения (30 сек)"
+        except FileNotFoundError:
+            return False, "❌ Python не найден (проверьте PATH)"
+        except Exception as e:
+            return False, str(e)
+
+
 # ==================== ГЛАВНОЕ ПРИЛОЖЕНИЕ ====================
 
 class LocalChatApp:
@@ -445,13 +972,13 @@ class LocalChatApp:
                      "input": "#3c3c3c", "fg": "#ffffff", "meta": "#888888",
                      "thinking": "#888888", "btn_send": "#4CAF50", "btn_stop": "#D32F2F",
                      "btn_neutral": "#555555", "btn_clear": "#666666", "btn_shop": "#2196F3",
-                     "btn_image": "#9C27B0"},
+                     "btn_image": "#9C27B0", "btn_agent": "#E91E63"},
             "light": {"bg": "#f0f0f0", "panel": "#e0e0e0", "sidebar": "#d8d8d8",
                       "sidebar_item": "#cccccc", "sidebar_item_active": "#c0c0c0",
                       "input": "#ffffff", "fg": "#000000", "meta": "#666666",
                       "thinking": "#888888", "btn_send": "#4CAF50", "btn_stop": "#D32F2F",
                       "btn_neutral": "#888888", "btn_clear": "#999999", "btn_shop": "#1976D2",
-                      "btn_image": "#7B1FA2"}
+                      "btn_image": "#7B1FA2", "btn_agent": "#C2185B"}
         }
 
         # ==================== ВЕРХНЯЯ ПАНЕЛЬ ====================
@@ -625,6 +1152,11 @@ class LocalChatApp:
                                    font=("Arial", 11, "bold"), relief=tk.FLAT, padx=15)
         self.image_btn.pack(side=tk.RIGHT, padx=(0, 5))
 
+        self.agent_btn = tk.Button(self.input_frame, text="🤖 Агент", command=self.open_agent,
+                                   bg=self.colors["dark"]["btn_agent"], fg="white",
+                                   font=("Arial", 11, "bold"), relief=tk.FLAT, padx=15)
+        self.agent_btn.pack(side=tk.RIGHT, padx=(0, 5))
+
         self.send_btn = tk.Button(self.input_frame, text="Отправить", command=self.send_message,
                                   bg=self.colors["dark"]["btn_send"], fg="white",
                                   font=("Arial", 11, "bold"), relief=tk.FLAT, padx=15)
@@ -639,6 +1171,7 @@ class LocalChatApp:
         self.last_response = ""
         self._image_windows = []
         self._generator_window = None
+        self._agent_window = None
 
         self._script_dir = os.path.dirname(os.path.abspath(__file__))
         self._chats_dir = os.path.join(self._script_dir, "chats")
@@ -705,6 +1238,15 @@ class LocalChatApp:
             return
 
         self._generator_window = ImageGeneratorWindow(self.root, self)
+
+    def open_agent(self):
+        """Открывает окно Агента для кода."""
+        if self._agent_window is not None and self._agent_window.win.winfo_exists():
+            self._agent_window.win.lift()
+            self._agent_window.win.focus()
+            return
+
+        self._agent_window = AgentWindow(self.root, self)
 
     def _translate_prompt(self, prompt_ru):
         """Переводит промт на английский через Qwen 0.5B."""
